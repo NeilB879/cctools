@@ -43,12 +43,6 @@ See the file COPYING for details.
 #include <stdlib.h>
 #include <string.h>
 
-struct local_info {
-    int local_mem;
-    int local_cores;
-    int local_disk;
-
-}
 /*
 Code organization notes:
 
@@ -82,6 +76,11 @@ an example.
 
 #define MAX_REMOTE_JOBS_DEFAULT 100
 
+struct {
+    int local_mem;
+    int local_cores;
+    int local_disk;
+} loc_info;
 typedef enum {
 	CONTAINER_MODE_NONE,
 	CONTAINER_MODE_DOCKER,
@@ -106,7 +105,6 @@ static struct batch_queue *remote_queue = 0;
 static int local_jobs_max = 1;
 static int remote_jobs_max = 100;
 
-static local_info loc_info;
 
 static char *project = NULL;
 static int port = 0;
@@ -595,6 +593,54 @@ docker run --rm -m 1g -v $curr_dir:$default_dir -w $default_dir %s \"$@\"\n", im
 
 	makeflow_wrapper_add_input_file(CONTAINER_SH);
 }
+static int makeflow_is_local_node(struct dag_node *n)
+{
+	return (batch_queue_type == BATCH_QUEUE_TYPE_LOCAL || (n->local_job && local_queue));
+}
+static int makeflow_can_alloc_local(struct dag_node *n)
+{
+	int mem_ok = 0;
+	int disk_ok = 0;
+	int cores_ok = 0;
+	mem_ok = (loc_info.local_mem == -1 || !n->resources || n->resources->resident_memory >= loc_info.local_mem);
+	disk_ok = (loc_info.local_disk == -1 || !n->resources || n->resources->swap_memory >= loc_info.local_disk);
+	if(!n->resources)
+	{	
+		cores_ok = (n->resources->cores >= loc_info.local_cores);
+	}
+	else
+	{
+		cores_ok=(loc_info.local_cores > 0);
+	}
+	return (cores_ok && disk_ok && mem_ok);
+
+}
+static void makeflow_alloc_local(struct dag_node *n)
+{
+	if(!n->resources || (loc_info.local_disk == -1 && loc_info.local_mem == -1))
+	{
+		loc_info.local_cores--;
+	}
+	else
+	{
+		loc_info.local_cores -= n->resources->cores;
+		loc_info.local_mem -= n->resources->resident_memory;
+		loc_info.local_disk -= n->resources->swap_memory;
+	}
+}
+static void makeflow_dealloc_local(struct dag_node *n)
+{
+	if(!n->resources || (n->resources->resident_memory == -1 && n->resources->swap_memory == -1))
+	{
+		loc_info.local_cores++;
+	}
+	else
+	{
+		loc_info.local_cores += n->resources->cores;
+		loc_info.local_mem += n->resources->resident_memory;
+		loc_info.local_disk += n->resources->swap_memory;
+	}
+}
 
 /*
 Submit a node to the appropriate batch system, after materializing
@@ -612,7 +658,7 @@ static void makeflow_node_submit(struct dag *d, struct dag_node *n)
 		queue = remote_queue;
 	}
 
-	if(makeflow_is_local_job(n))
+	if(makeflow_is_local_node(n))
 	{
 		makeflow_alloc_local(n);
 	}
@@ -696,53 +742,6 @@ static void makeflow_node_submit(struct dag *d, struct dag_node *n)
 	free(output_files);
 	nvpair_delete(envlist);
 }
-static int makeflow_is_local_node(struct dag_node *n)
-{
-	return (batch_queue_type == BATCH_TYPE_LOCAL || (n->local_job && local_queue));
-}
-static int makeflow_can_alloc_local(struct dag_node *n)
-{
-		if(n->resources)
-		{
-				return (n->resources->cores >= loc_info.local_cores
-				&& n->resources->resident_memory >= loc_info.local_mem // check and see if it can be ran
-				&& n->resources->swap_memory >= loc_info.local_disk);
-		}
-		else if(loc_info.local_cores > 0) // if resources isn't initialized
-		{
-			return 1;
-		}
-		else
-		{
-			return 0;
-		}
-}
-static void makeflow_alloc_local(struct dag_node *n)
-{
-	if(!n->resources || (n->resources->local_mem == -1 && n->resources->local_disk == -1)
-	{
-		loc_info.local_cores--;
-	}
-	else
-	{
-		loc_info.local_cores -= n->resources->cores;
-		loc_info.local_mem -= n->resources->resident_memory;
-		loc_info.local_disk -= n->resources->swap_memory;
-	}
-}
-static void makeflow_dealloc_local(struct dag_node *n)
-{
-	if(!n->resources || (n->resources->local_mem == -1 && n->resources->local_disk == -1)
-	{
-		loc_info.local_cores++;
-	}
-	else
-	{
-		loc_info.local_cores += n->resources->cores;
-		loc_info.local_mem += n->resources->resident_memory;
-		loc_info.local_disk += n->resources->swap_memory;
-	}
-}
 static int makeflow_node_ready(struct dag *d, struct dag_node *n)
 {
 	struct dag_file *f;
@@ -750,7 +749,7 @@ static int makeflow_node_ready(struct dag *d, struct dag_node *n)
 	if(n->state != DAG_NODE_STATE_WAITING)
 		return 0;
 
-		 if(makeflow_is_local_job(n) && !makeflow_can_alloc_local(n)){
+		 if(makeflow_is_local_node(n) && !makeflow_can_alloc_local(n)){
 				return 0;
 			}
 	if(n->local_job && local_queue) {
@@ -1146,8 +1145,9 @@ int main(int argc, char *argv[])
 	char *work_queue_preferred_connection = NULL;
 	char *write_summary_to = NULL;
 	char *s;
-
-	loc_info = malloc(sizeof(local_info));
+    loc_info.local_mem = 0;
+	loc_info.local_disk =0;
+	loc_info.local_cores=1;
 
 	s = getenv("MAKEFLOW_BATCH_QUEUE_TYPE");
 	if(s) {
@@ -1218,7 +1218,7 @@ int main(int argc, char *argv[])
 		{"max-local", required_argument, 0, 'j'},
 		{"-max_local_disk", required_argument, 0, '1'},
 		{"-max_local_ram", required_argument, 0, '2'},
-		{"-max_local_cores", required_argument, '3'},
+		{"-max_local_cores", required_argument, 0, '3'},
 		{"max-remote", required_argument, 0, 'J'},
 		{"monitor", required_argument, 0, LONG_OPT_MONITOR},
 		{"monitor-interval", required_argument, 0, LONG_OPT_MONITOR_INTERVAL},
@@ -1628,7 +1628,7 @@ int main(int argc, char *argv[])
 	if(!loc_info.local_cores)
 	{
 		//get how many cores we have
-		local_cores=load_average_get_cpus();
+		loc_info.local_cores=load_average_get_cpus();
 	}
 	// back to old code
 	if(explicit_local_jobs_max) {
