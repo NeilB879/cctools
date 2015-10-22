@@ -43,6 +43,12 @@ See the file COPYING for details.
 #include <stdlib.h>
 #include <string.h>
 
+struct local_info {
+    int local_mem;
+    int local_cores;
+    int local_disk;
+
+}
 /*
 Code organization notes:
 
@@ -99,6 +105,8 @@ static struct batch_queue *remote_queue = 0;
 
 static int local_jobs_max = 1;
 static int remote_jobs_max = 100;
+
+static local_info loc_info;
 
 static char *project = NULL;
 static int port = 0;
@@ -604,6 +612,10 @@ static void makeflow_node_submit(struct dag *d, struct dag_node *n)
 		queue = remote_queue;
 	}
 
+	if(makeflow_is_local_job(n))
+	{
+		makeflow_alloc_local(n);
+	}
 	/* Create strings for all the files mentioned by this node. */
 	char *input_files = makeflow_file_list_format(n,0,n->source_files,queue);
 	char *output_files = makeflow_file_list_format(n,0,n->target_files,queue);
@@ -684,7 +696,53 @@ static void makeflow_node_submit(struct dag *d, struct dag_node *n)
 	free(output_files);
 	nvpair_delete(envlist);
 }
-
+static int makeflow_is_local_node(struct dag_node *n)
+{
+	return (batch_queue_type == BATCH_TYPE_LOCAL || (n->local_job && local_queue));
+}
+static int makeflow_can_alloc_local(struct dag_node *n)
+{
+		if(n->resources)
+		{
+				return (n->resources->cores >= loc_info.local_cores
+				&& n->resources->resident_memory >= loc_info.local_mem // check and see if it can be ran
+				&& n->resources->swap_memory >= loc_info.local_disk);
+		}
+		else if(loc_info.local_cores > 0) // if resources isn't initialized
+		{
+			return 1;
+		}
+		else
+		{
+			return 0;
+		}
+}
+static void makeflow_alloc_local(struct dag_node *n)
+{
+	if(!n->resources || (n->resources->local_mem == -1 && n->resources->local_disk == -1)
+	{
+		loc_info.local_cores--;
+	}
+	else
+	{
+		loc_info.local_cores -= n->resources->cores;
+		loc_info.local_mem -= n->resources->resident_memory;
+		loc_info.local_disk -= n->resources->swap_memory;
+	}
+}
+static void makeflow_dealloc_local(struct dag_node *n)
+{
+	if(!n->resources || (n->resources->local_mem == -1 && n->resources->local_disk == -1)
+	{
+		loc_info.local_cores++;
+	}
+	else
+	{
+		loc_info.local_cores += n->resources->cores;
+		loc_info.local_mem += n->resources->resident_memory;
+		loc_info.local_disk += n->resources->swap_memory;
+	}
+}
 static int makeflow_node_ready(struct dag *d, struct dag_node *n)
 {
 	struct dag_file *f;
@@ -692,6 +750,9 @@ static int makeflow_node_ready(struct dag *d, struct dag_node *n)
 	if(n->state != DAG_NODE_STATE_WAITING)
 		return 0;
 
+		 if(makeflow_is_local_job(n) && !makeflow_can_alloc_local(n)){
+				return 0;
+			}
 	if(n->local_job && local_queue) {
 		if(dag_local_jobs_running(d) >= local_jobs_max)
 			return 0;
@@ -784,7 +845,8 @@ static void makeflow_node_complete(struct dag *d, struct dag_node *n, struct bat
 
 	if(n->state != DAG_NODE_STATE_RUNNING)
 		return;
-
+	if(makeflow_is_local_node(n))
+		makeflow_dealloc_local(n);
 	if(info->exited_normally && info->exit_code == 0) {
 		list_first_item(n->target_files);
 		while((f = list_next_item(n->target_files))) {
@@ -1085,6 +1147,8 @@ int main(int argc, char *argv[])
 	char *write_summary_to = NULL;
 	char *s;
 
+	loc_info = malloc(sizeof(local_info));
+
 	s = getenv("MAKEFLOW_BATCH_QUEUE_TYPE");
 	if(s) {
 		batch_queue_type = batch_queue_type_from_string(s);
@@ -1152,6 +1216,9 @@ int main(int argc, char *argv[])
 		{"help", no_argument, 0, 'h'},
 		{"makeflow-log", required_argument, 0, 'l'},
 		{"max-local", required_argument, 0, 'j'},
+		{"-max_local_disk", required_argument, '1'},
+		{"-max_local_ram", required_argument, '2'},
+		{"-max_local_cores", required_argument, '3'},
 		{"max-remote", required_argument, 0, 'J'},
 		{"monitor", required_argument, 0, LONG_OPT_MONITOR},
 		{"monitor-interval", required_argument, 0, LONG_OPT_MONITOR_INTERVAL},
@@ -1190,7 +1257,7 @@ int main(int argc, char *argv[])
 		{0, 0, 0, 0}
 	};
 
-	static const char option_string_run[] = "aAB:c::C:d:Ef:F:g:G:hj:J:l:L:m:M:N:o:Op:P:r:RS:t:T:u:vW:X:zZ:";
+	static const char option_string_run[] = "aAB:c::C:d:Ef:F:g:G:hj:J:l:L:m:M:N:o:Op:P:r:RS:t:T:u:vW:X:zZ:123:";
 
 	while((c = getopt_long(argc, argv, option_string_run, long_options_run, NULL)) >= 0) {
 		switch (c) {
@@ -1277,6 +1344,15 @@ int main(int argc, char *argv[])
 				break;
 			case 'J':
 				explicit_remote_jobs_max = atoi(optarg);
+				break;
+			case '1':
+				loc_info.local_disk = atoi(optarg);
+				break;
+			case '2':
+				loc_info.local_mem = atoi(optarg);
+				break;
+			case '3':
+				loc_info.local_cores = atoi(optarg);
 				break;
 			case 'l':
 				logfilename = xxstrdup(optarg);
@@ -1541,7 +1617,20 @@ int main(int argc, char *argv[])
 	if(batch_queue_type == BATCH_QUEUE_TYPE_LOCAL) {
 		explicit_remote_jobs_max = explicit_local_jobs_max;
 	}
-
+	if(!loc_info.local_disk)
+	{
+		loc_info.local_disk = -1;
+	}
+	if(!loc_info.local_mem)
+	{
+		loc_info.local_mem = -1;
+	}
+	if(!loc_info.local_cores)
+	{
+		//get how many cores we have
+		local_cores=load_average_get_cpus();
+	}
+	// back to old code
 	if(explicit_local_jobs_max) {
 		local_jobs_max = explicit_local_jobs_max;
 	} else {
