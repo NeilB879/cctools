@@ -77,9 +77,9 @@ an example.
 #define MAX_REMOTE_JOBS_DEFAULT 100
 
 struct {
-    int local_mem;
-    int local_cores;
-    int local_disk;
+	int local_mem;
+	int local_cores;
+	int local_disk;
 } loc_info;
 typedef enum {
 	CONTAINER_MODE_NONE,
@@ -599,13 +599,13 @@ static int makeflow_is_local_node(struct dag_node *n)
 }
 static int makeflow_can_alloc_local(struct dag_node *n)
 {
-	int mem_ok = 0;
-	int disk_ok = 0;
-	int cores_ok = 0;
+    int mem_ok = 0;
+    int disk_ok = 0;
+    int cores_ok = 0;
 	mem_ok = (loc_info.local_mem == -1 || !n->resources || n->resources->resident_memory >= loc_info.local_mem);
 	disk_ok = (loc_info.local_disk == -1 || !n->resources || n->resources->swap_memory >= loc_info.local_disk);
 	if(!n->resources)
-	{	
+	{
 		cores_ok = (n->resources->cores >= loc_info.local_cores);
 	}
 	else
@@ -1145,7 +1145,7 @@ int main(int argc, char *argv[])
 	char *work_queue_preferred_connection = NULL;
 	char *write_summary_to = NULL;
 	char *s;
-    loc_info.local_mem = 0;
+	loc_info.local_mem = 0;
 	loc_info.local_disk =0;
 	loc_info.local_cores=1;
 
@@ -1627,10 +1627,8 @@ int main(int argc, char *argv[])
 	}
 	if(!loc_info.local_cores)
 	{
-		//get how many cores we have
 		loc_info.local_cores=load_average_get_cpus();
 	}
-	// back to old code
 	if(explicit_local_jobs_max) {
 		local_jobs_max = explicit_local_jobs_max;
 	} else {
