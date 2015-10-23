@@ -46,6 +46,7 @@ static int catalog_port = 0;
 static int workers_min = 5;
 static int workers_max = 100;
 static double tasks_per_worker = -1;
+static int pool_timeout = -1;
 static int worker_timeout = 300;
 static int consider_capacity = 0;
 static char *project_regex = 0;
@@ -474,7 +475,8 @@ static void mainloop( struct batch_queue *queue, const char *project_regex, cons
 
 	struct list *masters_list = NULL;
 	struct list *foremen_list = NULL;
-
+	int timerState = 0;
+	time_t timerEnd = 0;
 	while(!abort_flag) {
 
 		if(config_file && !read_config_file(config_file)) {
@@ -486,7 +488,24 @@ static void mainloop( struct batch_queue *queue, const char *project_regex, cons
 		const char *submission_regex = foremen_regex ? foremen_regex : project_regex;
 
 		masters_list = work_queue_catalog_query(catalog_host,catalog_port,project_regex);
-
+		
+		if(pool_timeout) {
+			if(!list_size(masters_list)) {
+				if(timerState) {
+					time_t currTime = time(0);
+ 					if(timerEnd < currTime) {
+						debug(D_NOTICE, "Ended run because pool-timeout");
+						exit(1);
+					}
+				} else { //if timer hasn't started, then start timer
+					timerState = 1;
+					timerEnd = time(0) + pool_timeout;
+				}
+			} else {
+				timerState = 0;
+			}
+		}
+		
 		debug(D_WQ,"evaluating master list...");
 		int workers_needed = count_workers_needed(masters_list, 0);
 
@@ -587,7 +606,7 @@ static void show_help(const char *cmd)
 	printf(" %-30s Show this screen.\n", "-h,--help");
 }
 
-enum { LONG_OPT_CORES = 255, LONG_OPT_MEMORY, LONG_OPT_DISK, LONG_OPT_GPUS, LONG_OPT_TASKS_PER_WORKER, LONG_OPT_CONF_FILE };
+enum { LONG_OPT_CORES = 255, LONG_OPT_MEMORY, LONG_OPT_DISK, LONG_OPT_GPUS, LONG_OPT_TASKS_PER_WORKER, LONG_OPT_CONF_FILE, LONG_OPT_TIMEOUT };
 static const struct option long_options[] = {
 	{"master-name", required_argument, 0, 'M'},
 	{"foremen-name", required_argument, 0, 'F'},
@@ -602,7 +621,8 @@ static const struct option long_options[] = {
 	{"cores",  required_argument,  0,  LONG_OPT_CORES},
 	{"memory", required_argument,  0,  LONG_OPT_MEMORY},
 	{"disk",   required_argument,  0,  LONG_OPT_DISK},
-	{"gpus",   required_argument,  0,  LONG_OPT_GPUS},
+	{"gpus",   required_argument,  0,  LONG_OPT_GPUS},	
+	{"pool-timeout", required_argument, 0, LONG_OPT_TIMEOUT},
 	{"scratch-dir", required_argument, 0, 'S' },
 	{"capacity", no_argument, 0, 'c' },
 	{"debug", required_argument, 0, 'd'},
@@ -670,6 +690,9 @@ int main(int argc, char *argv[])
 				break;
 			case LONG_OPT_GPUS:
 				num_gpus_option = atoi(optarg);
+				break;
+			case LONG_OPT_TIMEOUT:
+				pool_timeout = atoi(optarg);
 				break;
 			case 'P':
 				password_file = optarg;
@@ -778,7 +801,7 @@ int main(int argc, char *argv[])
 
 	set_worker_resources( queue );
 
-	mainloop( queue, project_regex, foremen_regex );
+	mainloop( queue, project_regex, foremen_regex);
 
 	batch_queue_delete(queue);
 
